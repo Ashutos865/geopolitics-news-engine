@@ -2,21 +2,20 @@ name: Global News Update
 
 on:
   schedule:
-    # Runs every 5 minutes with a small offset to avoid peak traffic delays
     - cron: '2,7,12,17,22,27,32,37,42,47,52,57 * * * *'
-  workflow_dispatch:      # Allows manual trigger for testing
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 5     # Prevents one hung run from blocking the next 5-min cycle
+    timeout-minutes: 5
     permissions:
-      contents: write     
+      contents: write
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # Fetches full history so rebase/push works reliably
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -29,21 +28,21 @@ jobs:
           pip install aiohttp feedparser pandas trafilatura
 
       - name: Run Scraper
-        run: python scraper.py
+        # Changed: Must enter the RSS folder to find scraper.py
+        run: |
+          cd RSS
+          python scraper.py
 
       - name: Commit and Push Changes
         run: |
           git config --global user.name "GitHub Action Bot"
           git config --global user.email "actions@github.com"
           
-          # Pull the latest changes from the repo before pushing
-          # This prevents the "rejected" error if the bot or you changed something
           git pull origin main --rebase 
           
-          # Add all potential data changes
-          git add seen_links.json raw_news.json
+          # Changed: Adding files with their correct folder path
+          git add RSS/seen_links.json RSS/raw_news.json
           
-          # Commit only if there are changes; if no new news, it exits gracefully
           git commit -m "Auto-update: Tactical Intelligence Sync [$(date)]" || exit 0
           
           git push origin main
