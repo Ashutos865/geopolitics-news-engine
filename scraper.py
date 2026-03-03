@@ -42,8 +42,10 @@ async def fetch_feed(session, url):
     except: return None
 
 async def extract_tactical_data(session, item):
-    """Enhanced extraction for World Monitor UI."""
+    """Extraction with error handling for Connection Resets."""
     try:
+        # Added a tiny sleep to prevent 'Forcibly Closed' errors
+        await asyncio.sleep(0.1) 
         async with session.get(item['link'], timeout=12) as response:
             if response.status == 200:
                 html = await response.text()
@@ -51,51 +53,48 @@ async def extract_tactical_data(session, item):
                 
                 text_blob = (item['title'] + " " + (content or "")).lower()
                 item['content'] = content if content else "Tactical extraction failed."
-                
-                # Default Location
-                item['lat'], item['lng'] = [20.0, 0.0] # Default center
+                item['lat'], item['lng'] = [20.0, 0.0] 
                 item['location_tag'] = "Global"
                 
-                # Match Coordinates
                 for loc, coords in GEO_COORDINATES.items():
                     if re.search(rf"\b{loc.lower()}\b", text_blob):
                         item['lat'], item['lng'], item['location_tag'] = coords[0], coords[1], loc
                         break
 
-                # Tagging & Urgency
                 item['tags'] = [tag for tag, pat in INTEL_TAGS.items() if re.search(pat, text_blob)]
                 item['urgency'] = "High" if re.search(r"breaking|critical|alert|urgent|attack|strike", text_blob) else "Low"
-                
                 return item
-    except:
+    except Exception:
+        # Return item even if scrape fails so the link is still 'seen'
+        item['content'] = "Link analysis skipped (Connection Reset)."
         return item
 
 async def main():
-    print(f"📡 [SYSTEM] Wake-up: {datetime.now().isoformat()}")
+    # Removed emojis to prevent Windows UnicodeEncodeError
+    print(f"[SYSTEM] Wake-up: {datetime.now().isoformat()}")
     
-    # Load History
     seen_links = set()
     if os.path.exists(CACHE_FILE):
         try:
-            with open(CACHE_FILE, "r", encoding='utf-8-sig') as f:
-                seen_links = set(json.load(f))
-        except: pass
+            with open(CACHE_FILE, "r", encoding='utf-8') as f: # Strict UTF-8
+                data = json.load(f)
+                seen_links = set(data)
+        except Exception: pass
 
-    # Load Existing
     db = []
     if os.path.exists(OUTPUT_FILE):
         try:
             with open(OUTPUT_FILE, "r", encoding='utf-8') as f:
                 db = json.load(f)
-        except: pass
+        except Exception: pass
 
     try:
-        # Fetch Feeds
         df = pd.read_csv(SHEET_URL)
         urls = df.iloc[:, 3].dropna().tolist()
 
-        async with aiohttp.ClientSession(headers={'User-Agent': 'Mozilla/5.0'}) as session:
-            print(f"🔍 Checking {len(urls)} nodes...")
+        connector = aiohttp.TCPConnector(limit=10) # Limit concurrent connections to stay safe
+        async with aiohttp.ClientSession(connector=connector, headers={'User-Agent': 'Mozilla/5.0'}) as session:
+            print(f"[SYSTEM] Checking {len(urls)} nodes...")
             results = await asyncio.gather(*[fetch_feed(session, url) for url in urls])
 
             to_process = []
@@ -105,32 +104,32 @@ async def main():
                         link = entry.get("link")
                         if link and link not in seen_links:
                             to_process.append({
-                                "title": entry.get("title", "UNTITLED"),
+                                "title": entry.get("title", "UNTITLED").strip(),
                                 "link": link,
                                 "source": feed.feed.get("title", "Open Intel"),
                                 "timestamp": datetime.now().isoformat()
                             })
 
             if to_process:
-                print(f"⚡ Processing {len(to_process)} new intel packets...")
+                print(f"[SYSTEM] Processing {len(to_process)} packets...")
                 new_data = await asyncio.gather(*[extract_tactical_data(session, item) for item in to_process])
+                new_data = [d for d in new_data if d is not None]
+                
                 for art in new_data:
                     seen_links.add(art['link'])
                 db = (new_data + db)[:MAX_STORAGE_LIMIT]
             else:
-                print("✅ No new links. Refreshing existing database structures.")
+                print("[SYSTEM] No new links.")
 
-            # ALWAYS SAVE (Ensures React always gets a fresh file)
             with open(OUTPUT_FILE, "w", encoding='utf-8') as f:
                 json.dump(db, f, indent=4, ensure_ascii=False)
 
             with open(CACHE_FILE, "w", encoding='utf-8') as f:
                 json.dump(list(seen_links)[-5000:], f, indent=4, ensure_ascii=False)
 
-            print(f"🎯 Operational: Database contains {len(db)} reports.")
+            print(f"[STATUS] Database Synchronized: {len(db)} reports.")
 
     except Exception as e:
-        print(f"⚠️ FAULT: {e}")
-
+        print(f"[FAULT] {e}")
 if __name__ == "__main__":
     asyncio.run(main())
