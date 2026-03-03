@@ -18,20 +18,26 @@ async def fetch_feed(session, url):
     except: return None
 
 async def main():
-    # --- 1. Load Memory (Seen Links) ---
+    # --- 1. Load Memory (Seen Links) with safe encoding ---
+    seen_links = set()
     if os.path.exists(CACHE_FILE):
-        with open(CACHE_FILE, "r") as f:
-            seen_links = set(json.load(f))
-    else:
-        seen_links = set()
+        try:
+            # We use utf-8-sig to handle Windows "BOM" markers automatically
+            with open(CACHE_FILE, "r", encoding='utf-8-sig') as f:
+                data = json.load(f)
+                seen_links = set(data)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            print("Memory file corrupted, starting fresh.")
+            seen_links = set()
 
     try:
         # --- 2. Load Feeds from Sheet ---
         df = pd.read_csv(SHEET_URL)
+        # Use column index 3 (RSS URL)
         urls = df.iloc[:, 3].dropna().tolist()
 
         # --- 3. Fetch All Feeds ---
-        print(f"Checking {len(urls)} sources for new updates...")
+        print(f"Checking {len(urls)} sources for updates...")
         async with aiohttp.ClientSession() as session:
             tasks = [fetch_feed(session, url) for url in urls]
             results = await asyncio.gather(*tasks)
@@ -39,7 +45,7 @@ async def main():
         # --- 4. Filter only NEW articles ---
         new_articles = []
         for feed in results:
-            if feed and feed.entries:
+            if feed and hasattr(feed, 'entries'):
                 for entry in feed.entries[:5]:
                     link = entry.get("link")
                     if link and link not in seen_links:
@@ -50,18 +56,17 @@ async def main():
                         })
                         seen_links.add(link)
 
-        # --- 5. Save ONLY the new articles for this run ---
+        # --- 5. Save ONLY new articles ---
         with open("raw_news.json", "w", encoding='utf-8') as f:
-            json.dump(new_articles, f, indent=4)
+            json.dump(new_articles, f, indent=4, ensure_ascii=False)
         
-        # --- 6. Update Memory (Keep only last 5000 links to save space) ---
-        with open(CACHE_FILE, "w") as f:
-            json.dump(list(seen_links)[-5000:], f)
+        # --- 6. Update Memory (Limit to last 5000) ---
+        with open(CACHE_FILE, "w", encoding='utf-8') as f:
+            json.dump(list(seen_links)[-5000:], f, indent=4, ensure_ascii=False)
         
-        print(f"Iteration Complete: Found {len(new_articles)} NEW articles.")
+        print(f"Success: Found {len(new_articles)} NEW articles.")
 
     except Exception as e:
-        print(f"ERROR: {e}")
-
+        print(f"CRITICAL ERROR: {e}")
 if __name__ == "__main__":
     asyncio.run(main())
