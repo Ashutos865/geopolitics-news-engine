@@ -2,27 +2,26 @@ name: Global News Update
 
 on:
   schedule:
-    # Using a slight offset (starting at minute 2) to bypass peak traffic
     - cron: '2,7,12,17,22,27,32,37,42,47,52,57 * * * *'
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 4  # Ensure it finishes before the next 5-minute cycle starts
+    timeout-minutes: 5
     permissions:
       contents: write
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # Fetches all history so push is smoother
+          fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v5 # Upgraded to v5
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: 'pip' # Speeds up the run by caching dependencies
+          # Removed the 'cache' line to stop the error until you have a requirements file
 
       - name: Install Dependencies
         run: |
@@ -36,7 +35,6 @@ jobs:
         run: |
           git config --global user.name "GitHub Action Bot"
           git config --global user.email "actions@github.com"
-          # Pull latest in case a manual change happened during the run
           git pull origin main --rebase 
           git add seen_links.json raw_news.json
           git commit -m "Tactical Intel Update: $(date)" || exit 0
