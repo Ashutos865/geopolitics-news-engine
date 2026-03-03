@@ -12,25 +12,26 @@ import re
 SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRYXAkf_syLltQDImMYKPJb5XRrOceJiLIzUSnwKJr58QvfcQeVZRaFJaDovLJD8kEiyXId85HS7xcP/pub?gid=893052359&single=true&output=csv"
 CACHE_FILE = "seen_links.json"
 OUTPUT_FILE = "raw_news.json"
-MAX_STORAGE_LIMIT = 1200  # Supports your 1000+ news goal
-MAX_ENTRIES_PER_FEED = 5
+MAX_STORAGE_LIMIT = 1500  # Increased for deeper history
+MAX_ENTRIES_PER_FEED = 10 # Get more data per run
 
-# --- INTELLIGENCE DICTIONARIES ---
+# --- EXPANDED GEOSPATIAL INTELLIGENCE ---
 GEO_COORDINATES = {
     "Taiwan": [23.69, 120.96], "Ukraine": [48.37, 31.16], "Israel": [31.04, 34.85],
     "Gaza": [31.35, 34.30], "Russia": [61.52, 105.31], "Iran": [32.42, 53.68],
     "South China Sea": [12.0, 113.0], "Red Sea": [20.0, 38.0], "India": [20.59, 78.96],
     "USA": [37.09, -95.71], "China": [35.86, 104.19], "North Korea": [40.33, 127.51],
-    "Lebanon": [33.85, 35.86], "Syria": [34.80, 38.99], "Sudan": [12.86, 30.21]
+    "Lebanon": [33.85, 35.86], "Syria": [34.80, 38.99], "Sudan": [12.86, 30.21],
+    "Red Sea": [20.1, 38.5], "Bab al-Mandab": [12.6, 43.3], "Hormuz": [26.6, 56.2],
+    "Arctic": [76.0, 100.0], "Baltic": [57.0, 19.0], "Poland": [51.9, 19.1]
 }
 
-# Advanced Categorization Engine
 INTEL_TAGS = {
-    "Tech": r"ai|semiconductor|chip|cyber|quantum|space|satellite|startup|digital|telecom",
-    "Agri": r"grain|wheat|food security|crop|harvest|agriculture|fertilizer|famine|livestock",
-    "Defense": r"military|nato|missile|pentagon|warship|soldier|deployment|arms|pentagon",
-    "Finance": r"sanction|gdp|inflation|economy|trade|tariff|market|oil|energy|gas|bank",
-    "Conflict": r"explosion|strike|casualty|clash|invasion|protest|riot|ceasefire|bombing"
+    "Defense": r"military|nato|missile|warship|deployment|nuclear|pentagon|army|navy|air force",
+    "Energy": r"oil|gas|pipeline|nord stream|opec|energy|blackout|grid|nuclear plant",
+    "Cyber": r"hack|cyber|data breach|ransomware|satellite|quantum|starlink|encryption",
+    "Agri": r"grain|wheat|food security|famine|crop|export",
+    "Trade": r"sanction|tariff|gdp|inflation|economy|chips|semiconductor|supply chain"
 }
 
 async def fetch_feed(session, url):
@@ -38,46 +39,41 @@ async def fetch_feed(session, url):
         async with session.get(url, timeout=15) as response:
             if response.status == 200:
                 return feedparser.parse(await response.text())
-    except Exception: return None
+    except: return None
 
 async def extract_tactical_data(session, item):
-    """Deep extraction with auto-categorization and geospatial tagging."""
+    """Enhanced extraction for World Monitor UI."""
     try:
-        async with session.get(item['link'], timeout=15) as response:
+        async with session.get(item['link'], timeout=12) as response:
             if response.status == 200:
                 html = await response.text()
-                content = trafilatura.extract(html, include_comments=False, include_tables=False)
+                content = trafilatura.extract(html, include_comments=False)
                 
-                full_intel = (item['title'] + " " + (content or "")).lower()
-                item['content'] = content if content else "Full tactical data extraction failed."
-                item['summary'] = (content[:250].strip() + "...") if content else "Brief intelligence report available."
-
-                # 1. Geospatial Tagging
-                item['lat'], item['lng'] = [None, None]
+                text_blob = (item['title'] + " " + (content or "")).lower()
+                item['content'] = content if content else "Tactical extraction failed."
+                
+                # Default Location
+                item['lat'], item['lng'] = [20.0, 0.0] # Default center
                 item['location_tag'] = "Global"
+                
+                # Match Coordinates
                 for loc, coords in GEO_COORDINATES.items():
-                    if re.search(rf"\b{loc.lower()}\b", full_intel):
+                    if re.search(rf"\b{loc.lower()}\b", text_blob):
                         item['lat'], item['lng'], item['location_tag'] = coords[0], coords[1], loc
                         break
 
-                # 2. Automated Tagging
-                item['tags'] = []
-                for tag, pattern in INTEL_TAGS.items():
-                    if re.search(pattern, full_intel):
-                        item['tags'].append(tag)
+                # Tagging & Urgency
+                item['tags'] = [tag for tag, pat in INTEL_TAGS.items() if re.search(pat, text_blob)]
+                item['urgency'] = "High" if re.search(r"breaking|critical|alert|urgent|attack|strike", text_blob) else "Low"
                 
-                # 3. Urgency Detection
-                item['urgency'] = "Critical" if re.search(r"urgent|breaking|immediate|critical|alert", full_intel) else "Standard"
-
                 return item
-    except Exception:
-        item['content'] = "Node unreachable during extraction."
+    except:
         return item
 
 async def main():
-    print(f"📡 [SYSTEM] Operational Start: {datetime.now().strftime('%H:%M:%S')}")
+    print(f"📡 [SYSTEM] Wake-up: {datetime.now().isoformat()}")
     
-    # 1. Load History (Duplicates Prevention)
+    # Load History
     seen_links = set()
     if os.path.exists(CACHE_FILE):
         try:
@@ -85,27 +81,27 @@ async def main():
                 seen_links = set(json.load(f))
         except: pass
 
-    # 2. Load Existing Database (Persistence Logic)
-    existing_articles = []
+    # Load Existing
+    db = []
     if os.path.exists(OUTPUT_FILE):
         try:
             with open(OUTPUT_FILE, "r", encoding='utf-8') as f:
-                existing_articles = json.load(f)
+                db = json.load(f)
         except: pass
 
     try:
+        # Fetch Feeds
         df = pd.read_csv(SHEET_URL)
         urls = df.iloc[:, 3].dropna().tolist()
 
-        async with aiohttp.ClientSession(headers={'User-Agent': 'GeoIntel/2.0'}) as session:
-            # 3. Check for New Intelligence
-            print(f"🔍 [SYSTEM] Checking {len(urls)} nodes...")
-            feeds = await asyncio.gather(*[fetch_feed(session, url) for url in urls])
+        async with aiohttp.ClientSession(headers={'User-Agent': 'Mozilla/5.0'}) as session:
+            print(f"🔍 Checking {len(urls)} nodes...")
+            results = await asyncio.gather(*[fetch_feed(session, url) for url in urls])
 
             to_process = []
-            for feed in feeds:
+            for feed in results:
                 if feed and hasattr(feed, 'entries'):
-                    for entry in feed.entries[:MAX_ENTRIES_PER_FEED]: 
+                    for entry in feed.entries[:MAX_ENTRIES_PER_FEED]:
                         link = entry.get("link")
                         if link and link not in seen_links:
                             to_process.append({
@@ -115,31 +111,26 @@ async def main():
                                 "timestamp": datetime.now().isoformat()
                             })
 
-            if not to_process:
-                print("✅ [SYSTEM] No new intelligence. Monitoring...")
-                return
+            if to_process:
+                print(f"⚡ Processing {len(to_process)} new intel packets...")
+                new_data = await asyncio.gather(*[extract_tactical_data(session, item) for item in to_process])
+                for art in new_data:
+                    seen_links.add(art['link'])
+                db = (new_data + db)[:MAX_STORAGE_LIMIT]
+            else:
+                print("✅ No new links. Refreshing existing database structures.")
 
-            # 4. Deep Tactical Extraction
-            print(f"⚡ [SYSTEM] Processing {len(to_process)} new packets...")
-            new_articles = await asyncio.gather(*[extract_tactical_data(session, item) for item in to_process])
-
-            # 5. Database Integration (Grow to 1000+)
-            for art in new_articles:
-                seen_links.add(art['link'])
-
-            # Merge new with old and prune to limit
-            total_intelligence = (new_articles + existing_articles)[:MAX_STORAGE_LIMIT]
-
+            # ALWAYS SAVE (Ensures React always gets a fresh file)
             with open(OUTPUT_FILE, "w", encoding='utf-8') as f:
-                json.dump(total_intelligence, f, indent=4, ensure_ascii=False)
+                json.dump(db, f, indent=4, ensure_ascii=False)
 
             with open(CACHE_FILE, "w", encoding='utf-8') as f:
-                json.dump(list(seen_links)[-4000:], f, indent=4, ensure_ascii=False)
+                json.dump(list(seen_links)[-5000:], f, indent=4, ensure_ascii=False)
 
-            print(f"🎯 [SYSTEM] Success: Database expanded to {len(total_intelligence)} reports.")
+            print(f"🎯 Operational: Database contains {len(db)} reports.")
 
     except Exception as e:
-        print(f"⚠️ [CRITICAL] System Fault: {e}")
+        print(f"⚠️ FAULT: {e}")
 
 if __name__ == "__main__":
     asyncio.run(main())
