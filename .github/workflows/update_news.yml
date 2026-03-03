@@ -11,6 +11,12 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: write
+    
+    # This ensures everything runs inside your RSS folder
+    defaults:
+      run:
+        working-directory: RSS
+
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -28,21 +34,17 @@ jobs:
           pip install aiohttp feedparser pandas trafilatura
 
       - name: Run Scraper
-        # Changed: Must enter the RSS folder to find scraper.py
-        run: |
-          cd RSS
-          python scraper.py
+        run: python scraper.py
 
       - name: Commit and Push Changes
         run: |
           git config --global user.name "GitHub Action Bot"
           git config --global user.email "actions@github.com"
           
+          # We need to move back to root to push, but add the files in RSS
+          cd ..
           git pull origin main --rebase 
-          
-          # Changed: Adding files with their correct folder path
           git add RSS/seen_links.json RSS/raw_news.json
           
           git commit -m "Auto-update: Tactical Intelligence Sync [$(date)]" || exit 0
-          
           git push origin main
