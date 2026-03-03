@@ -2,8 +2,9 @@ name: Global News Update
 
 on:
   schedule:
-    - cron: '*/5 * * * *' # Runs every 5 minutes
-  workflow_dispatch:      # Adds a "Run" button for manual testing
+    # Runs every 12 minutes (Professional interval to prevent push collisions)
+    - cron: '*/12 * * * *' 
+  workflow_dispatch:
 
 jobs:
   build:
@@ -14,7 +15,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # Essential so the bot can merge changes
+          fetch-depth: 0 
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -33,11 +34,21 @@ jobs:
           git config --global user.name "GitHub Action Bot"
           git config --global user.email "actions@github.com"
           
-          # 1. Pull latest changes and REBASE to avoid merge commits
+          # 1. Temporarily hide the new data changes
+          git stash
+          
+          # 2. Get the latest code from the repo
           git pull origin main --rebase
           
-          # 2. Add only the data files
+          # 3. Bring your new news data back
+          git stash pop || echo "No changes to pop"
+          
+          # 4. Stage and push
           git add seen_links.json raw_news.json
           
-          # 3. Only commit if there are actual changes
-          git diff --staged --quiet || (git commit -m "Auto-update: Intelligence Sync" && git push origin main)
+          if git diff --staged --quiet; then
+            echo "No new intelligence data."
+          else
+            git commit -m "Intelligence Sync: $(date +'%Y-%m-%d %H:%M')"
+            git push origin main
+          fi
