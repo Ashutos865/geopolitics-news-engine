@@ -52,3 +52,6 @@ jobs:
             git commit -m "Intelligence Sync: $(date +'%Y-%m-%d %H:%M')"
             git push origin main
           fi
+        - name: Install Dependencies
+        run: |
+          pip install aiohttp feedparser pandas trafilatura google-generativeai
