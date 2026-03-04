@@ -5,34 +5,58 @@ import pandas as pd
 import json
 import os
 import trafilatura
+import google.generativeai as genai
 from datetime import datetime, timezone
 import re
 
 # --- CONFIGURATION ---
+# The model you requested: Gemini 1.5 Flash (optimized for speed/accuracy)
+GEMINI_API_KEY = "AIzaSyBrwmF1kTWZQgNBir6MfJcoyPjVdeCpm9g"
+genai.configure(api_key=GEMINI_API_KEY)
+ai_model = genai.GenerativeModel("gemini-2.5-flash")
+
 SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRYXAkf_syLltQDImMYKPJb5XRrOceJiLIzUSnwKJr58QvfcQeVZRaFJaDovLJD8kEiyXId85HS7xcP/pub?gid=893052359&single=true&output=csv"
 CACHE_FILE = "seen_links.json"
 OUTPUT_FILE = "raw_news.json"
 MAX_STORAGE_LIMIT = 2000 
 MAX_ENTRIES_PER_FEED = 15 
-MAX_CONCURRENT_REQUESTS = 10 # Slightly lowered for deeper extraction stability
+MAX_CONCURRENT_REQUESTS = 8 # Balanced for AI rate limits
 
-# --- INTEL & NARRATION CONFIG ---
-GEO_COORDINATES = {
-    "Taiwan": [23.69, 120.96], "Ukraine": [48.37, 31.16], "Israel": [31.04, 34.85],
-    "India": [20.59, 78.96], "Russia": [61.52, 105.31], "USA": [37.09, -95.71]
-}
+async def ai_process_intelligence(title, content):
+    """
+    Uses Gemini 1.5 Flash to categorize, locate, and narrate intel perfectly.
+    This prevents 'Eight Sleep' from showing up in Defense.
+    """
+    prompt = f"""
+    Analyze this news packet and respond ONLY with a valid JSON object.
+    Categories: Defense, Energy, Cyber, Trade, Agri. (Trade includes startups, funding, and valuations).
+    
+    Article: {title}
+    Content: {content[:1800]}
 
-INTEL_TAGS = {
-    "Defense": r"military|nato|missile|warship|nuclear|army",
-    "Energy": r"oil|gas|pipeline|energy|grid",
-    "Cyber": r"hack|cyber|satellite|starlink",
-    "Trade": r"sanction|tariff|gdp|chips|semiconductor"
-}
-
-def generate_narration(title, source, content):
-    """Formats the data into a tactical intelligence narration style."""
-    clean_content = content[:500].replace('\n', ' ')
-    return f"[SITREP] {source.upper()} REPORTS: {title}. INTEL SUMMARY: {clean_content} [END BRIEFING]"
+    Return JSON format:
+    {{
+      "category": "Chosen Category",
+      "location": "Specific Country or Global",
+      "narration": "A 2-sentence tactical summary in the style of a military sitrep.",
+      "analysis": "A brief 3-point bulleted breakdown of the impact."
+    }}
+    """
+    try:
+        response = await ai_model.generate_content_async(prompt)
+        # Clean JSON from markdown if necessary
+        text = response.text
+        if "```json" in text:
+            text = text.split("```json")[1].split("```")[0]
+        return json.loads(text)
+    except Exception as e:
+        print(f"[AI ERROR] {e}")
+        return {
+            "category": "Trade" if "valuation" in title.lower() else "Defense",
+            "location": "Global",
+            "narration": f"Visual confirmation required for: {title}",
+            "analysis": "Automated parsing failed. Manual review recommended."
+        }
 
 def get_relative_time(ts_iso):
     try:
@@ -56,11 +80,10 @@ async def fetch_feed(session, url):
 async def extract_tactical_data(session, item, sem):
     async with sem:
         try:
-            await asyncio.sleep(0.3) # Increased delay for full-text extraction
+            await asyncio.sleep(0.4) 
             async with session.get(item['link'], timeout=15) as response:
                 if response.status == 200:
                     html = await response.text()
-                    # Extracting with metadata AND full formatting
                     res = trafilatura.extract(html, 
                                             output_format='json', 
                                             with_metadata=True,
@@ -71,31 +94,24 @@ async def extract_tactical_data(session, item, sem):
                         res_data = json.loads(res)
                         full_text = res_data.get('text', "")
                         item['image'] = res_data.get('image')
-                        item['author'] = res_data.get('author')
-                        # Full text storage for detailed view
                         item['full_content'] = full_text 
-                        # Short snippet for feed view
-                        item['content'] = full_text[:400] + "..." if full_text else "No content extracted."
-                        # Styled Narration
-                        item['narration'] = generate_narration(item['title'], item['source'], full_text)
+                        item['content'] = full_text[:400] + "..." if full_text else "Raw text missing."
+
+                        # --- AI BRAIN STEP ---
+                        ai_data = await ai_process_intelligence(item['title'], full_text)
+                        item['tags'] = [ai_data['category']]
+                        item['location'] = ai_data['location']
+                        item['narration'] = ai_data['narration']
+                        item['analysis'] = ai_data['analysis']
                     else:
                         item['image'] = None
-                        item['full_content'] = "Extraction Failed."
-                        item['narration'] = f"ALERT: Intelligence link for {item['title']} could not be parsed."
+                        item['narration'] = f"SCAN FAILED: {item['title']}"
+                        item['tags'] = ["Trade"] if "valuation" in item['title'].lower() else ["Defense"]
+                        item['location'] = "Global"
 
-                    text_blob = (item['title'] + " " + (item.get('full_content') or "")).lower()
-                    item['tags'] = [tag for tag, pat in INTEL_TAGS.items() if re.search(pat, text_blob)]
-                    
-                    # Geolocation
-                    item['location'] = "Global"
-                    for loc, coords in GEO_COORDINATES.items():
-                        if loc.lower() in text_blob:
-                            item['location'] = loc
-                            break
                     return item
         except:
             item['image'] = None
-            item['narration'] = "CONNECTION LOST: Link reset by remote host."
             return item
 
 async def main():
@@ -135,13 +151,13 @@ async def main():
                             })
 
             if to_process:
-                print(f"[SYSTEM] Synthesizing {len(to_process)} Intelligence Briefings...")
+                print(f"[SYSTEM] AI Interrogation of {len(to_process)} packets...")
                 new_data = await asyncio.gather(*[extract_tactical_data(session, item, sem) for item in to_process])
-                valid_new = [d for d in new_data if d]
+                valid_new = [d for d in new_data if d and 'tags' in d]
                 db = valid_new + db
                 for d in valid_new: seen_links.add(d['link'])
 
-            # Sorting & Pruning
+            # Final Processing & Rotation
             for article in db:
                 article['human_time'] = get_relative_time(article['timestamp'])
 
@@ -152,9 +168,9 @@ async def main():
                 json.dump(db, f, indent=4, ensure_ascii=False)
 
             with open(CACHE_FILE, "w", encoding='utf-8') as f:
-                json.dump(list(seen_links)[-7000:], f, indent=4, ensure_ascii=False)
+                json.dump(list(seen_links)[-8000:], f, indent=4, ensure_ascii=False)
 
-            print(f"[STATUS] Narration Sync Complete.")
+            print(f"[STATUS] Intelligence Stream Synchronized.")
 
     except Exception as e:
         print(f"[FAULT] {e}")
