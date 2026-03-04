@@ -29,6 +29,8 @@ jobs:
         run: |
           pip install aiohttp feedparser pandas trafilatura google-generativeai
       - name: Run Scraper
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python scraper.py
 
       - name: Commit and Push Changes

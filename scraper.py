@@ -10,53 +10,47 @@ from datetime import datetime, timezone
 import re
 
 # --- CONFIGURATION ---
-# The model you requested: Gemini 1.5 Flash (optimized for speed/accuracy)
-GEMINI_API_KEY = "AIzaSyBrwmF1kTWZQgNBir6MfJcoyPjVdeCpm9g"
-genai.configure(api_key=GEMINI_API_KEY)
-ai_model = genai.GenerativeModel("gemini-2.5-flash")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") 
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    ai_model = genai.GenerativeModel("gemini-2.0-flash")
+else:
+    print("[ERROR] GEMINI_API_KEY not found in environment!")
 
 SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRYXAkf_syLltQDImMYKPJb5XRrOceJiLIzUSnwKJr58QvfcQeVZRaFJaDovLJD8kEiyXId85HS7xcP/pub?gid=893052359&single=true&output=csv"
 CACHE_FILE = "seen_links.json"
 OUTPUT_FILE = "raw_news.json"
 MAX_STORAGE_LIMIT = 2000 
 MAX_ENTRIES_PER_FEED = 15 
-MAX_CONCURRENT_REQUESTS = 8 # Balanced for AI rate limits
+MAX_CONCURRENT_REQUESTS = 5 
 
 async def ai_process_intelligence(title, content):
-    """
-    Uses Gemini 1.5 Flash to categorize, locate, and narrate intel perfectly.
-    This prevents 'Eight Sleep' from showing up in Defense.
-    """
+    if not GEMINI_API_KEY: return None
     prompt = f"""
     Analyze this news packet and respond ONLY with a valid JSON object.
     Categories: Defense, Energy, Cyber, Trade, Agri. (Trade includes startups, funding, and valuations).
     
-    Article: {title}
-    Content: {content[:1800]}
+    Article Title: {title}
+    Article Content: {content[:1800]}
 
     Return JSON format:
     {{
       "category": "Chosen Category",
       "location": "Specific Country or Global",
-      "narration": "A 2-sentence tactical summary in the style of a military sitrep.",
+      "narration": "A 2-sentence tactical summary in a professional intelligence style.",
       "analysis": "A brief 3-point bulleted breakdown of the impact."
     }}
     """
     try:
         response = await ai_model.generate_content_async(prompt)
-        # Clean JSON from markdown if necessary
         text = response.text
-        if "```json" in text:
-            text = text.split("```json")[1].split("```")[0]
-        return json.loads(text)
+        json_match = re.search(r'\{.*\}', text, re.DOTALL)
+        if json_match:
+            return json.loads(json_match.group())
+        return None
     except Exception as e:
         print(f"[AI ERROR] {e}")
-        return {
-            "category": "Trade" if "valuation" in title.lower() else "Defense",
-            "location": "Global",
-            "narration": f"Visual confirmation required for: {title}",
-            "analysis": "Automated parsing failed. Manual review recommended."
-        }
+        return None
 
 def get_relative_time(ts_iso):
     try:
@@ -80,52 +74,44 @@ async def fetch_feed(session, url):
 async def extract_tactical_data(session, item, sem):
     async with sem:
         try:
-            await asyncio.sleep(0.4) 
+            await asyncio.sleep(0.5) 
             async with session.get(item['link'], timeout=15) as response:
                 if response.status == 200:
                     html = await response.text()
-                    res = trafilatura.extract(html, 
-                                            output_format='json', 
-                                            with_metadata=True,
-                                            include_images=True,
-                                            include_formatting=True)
-                    
+                    res = trafilatura.extract(html, output_format='json', with_metadata=True)
                     if res:
                         res_data = json.loads(res)
                         full_text = res_data.get('text', "")
                         item['image'] = res_data.get('image')
                         item['full_content'] = full_text 
-                        item['content'] = full_text[:400] + "..." if full_text else "Raw text missing."
-
-                        # --- AI BRAIN STEP ---
+                        item['content'] = full_text[:400] + "..."
                         ai_data = await ai_process_intelligence(item['title'], full_text)
-                        item['tags'] = [ai_data['category']]
-                        item['location'] = ai_data['location']
-                        item['narration'] = ai_data['narration']
-                        item['analysis'] = ai_data['analysis']
-                    else:
-                        item['image'] = None
-                        item['narration'] = f"SCAN FAILED: {item['title']}"
-                        item['tags'] = ["Trade"] if "valuation" in item['title'].lower() else ["Defense"]
-                        item['location'] = "Global"
-
+                        if ai_data:
+                            item['tags'] = [ai_data.get('category')]
+                            item['location'] = ai_data.get('location')
+                            item['narration'] = ai_data.get('narration')
+                            item['analysis'] = ai_data.get('analysis')
+                        else:
+                            item['tags'] = ["Trade"] if "valuation" in item['title'].lower() else ["General"]
+                            item['location'] = "Global"
                     return item
-        except:
-            item['image'] = None
-            return item
+        except: return None
 
 async def main():
     print(f"[SYSTEM] Pulse Check: {datetime.now().isoformat()}")
-    
     seen_links = set()
     if os.path.exists(CACHE_FILE):
-        with open(CACHE_FILE, "r", encoding='utf-8') as f:
-            seen_links = set(json.load(f))
+        try:
+            with open(CACHE_FILE, "r", encoding='utf-8') as f:
+                seen_links = set(json.load(f))
+        except: pass
 
     db = []
     if os.path.exists(OUTPUT_FILE):
-        with open(OUTPUT_FILE, "r", encoding='utf-8') as f:
-            db = json.load(f)
+        try:
+            with open(OUTPUT_FILE, "r", encoding='utf-8') as f:
+                db = json.load(f)
+        except: pass
 
     sem = asyncio.BoundedSemaphore(MAX_CONCURRENT_REQUESTS)
 
@@ -135,7 +121,6 @@ async def main():
 
         async with aiohttp.ClientSession(headers={'User-Agent': 'Mozilla/5.0'}) as session:
             feeds = await asyncio.gather(*[fetch_feed(session, url) for url in urls])
-            
             to_process = []
             for feed in feeds:
                 if feed and hasattr(feed, 'entries'):
@@ -151,26 +136,34 @@ async def main():
                             })
 
             if to_process:
-                print(f"[SYSTEM] AI Interrogation of {len(to_process)} packets...")
+                print(f"[SYSTEM] Processing {len(to_process)} packets...")
                 new_data = await asyncio.gather(*[extract_tactical_data(session, item, sem) for item in to_process])
                 valid_new = [d for d in new_data if d and 'tags' in d]
+                
+                # --- STRICT FIFO ROTATION LOGIC ---
+                num_new = len(valid_new)
+                if len(db) + num_new > MAX_STORAGE_LIMIT:
+                    # Remove exactly the number of items we are about to add
+                    items_to_remove = (len(db) + num_new) - MAX_STORAGE_LIMIT
+                    db = db[:-items_to_remove] # Remove from the end (oldest)
+                
+                # Prepend new items to top
                 db = valid_new + db
                 for d in valid_new: seen_links.add(d['link'])
 
-            # Final Processing & Rotation
             for article in db:
                 article['human_time'] = get_relative_time(article['timestamp'])
 
+            # Final sort to ensure time consistency
             db.sort(key=lambda x: x['timestamp'], reverse=True)
-            db = db[:MAX_STORAGE_LIMIT]
 
             with open(OUTPUT_FILE, "w", encoding='utf-8') as f:
                 json.dump(db, f, indent=4, ensure_ascii=False)
 
             with open(CACHE_FILE, "w", encoding='utf-8') as f:
-                json.dump(list(seen_links)[-8000:], f, indent=4, ensure_ascii=False)
+                json.dump(list(seen_links)[-7000:], f, indent=4, ensure_ascii=False)
 
-            print(f"[STATUS] Intelligence Stream Synchronized.")
+            print(f"[STATUS] Database Rotated. Size: {len(db)}")
 
     except Exception as e:
         print(f"[FAULT] {e}")
