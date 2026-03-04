@@ -13,7 +13,7 @@ import re
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") 
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
-    ai_model = genai.GenerativeModel("gemini-3.1-flash-lite")
+    ai_model = genai.GenerativeModel("gemini-2.5-flash")
 else:
     print("[ERROR] GEMINI_API_KEY not found in environment!")
 
